@@ -1,6 +1,6 @@
 /* Electric UI Barebones Example project
 
-   Runs electricui-embedded and exposes interfaces over the boards main serial port (usb), and hardware uart
+   Runs electricui-embedded and exposes interfaces over uart
 
    MIT licenced.
 */
@@ -12,17 +12,21 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_log.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 
 #include "electricui.h"
 
-#define BUF_SIZE (1024)
+static const char *TAG = "eui_uart";
+
 #define GPIO_LED 13
 
 #define EXTERNAL_UART UART_NUM_2
 #define UART_TX 17
 #define UART_RX 16
+#define BUF_SIZE (1024)
+static QueueHandle_t uart2_queue;
 
 void serial_write( uint8_t *data, uint16_t len );
 
@@ -45,7 +49,15 @@ eui_message_t tracked_variables[] =
   EUI_UINT16( "lit_time",   glow_time ),
 };
 
-static void echo_task(void *pvParameter)
+static void eui_init( void )
+{
+    eui_setup_interface( &serial_comms );
+    EUI_TRACK( tracked_variables );
+    eui_setup_identifier( "hello", 5 );
+}
+
+
+static void uart_init( void )
 {
     // Setup the UART
     uart_config_t uart_config = {
@@ -54,43 +66,90 @@ static void echo_task(void *pvParameter)
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        // .source_clk = UART_SCLK_APB,
+        .source_clk = UART_SCLK_APB,
     };
 
+    uart_driver_install(EXTERNAL_UART, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart2_queue, 0);
     uart_param_config(EXTERNAL_UART, &uart_config);
-    uart_driver_install(EXTERNAL_UART, BUF_SIZE * 2, 0, 0, NULL, 0);
+
     uart_set_pin(EXTERNAL_UART, UART_TX, UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
 
-    // Configure a temporary buffer for the incoming data
-    uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
+static void uart_task(void *pvParameter)
+{
+    uart_event_t event;
+    uint16_t rx_read = 0;
+    uint8_t* dtmp = (uint8_t*) malloc(BUF_SIZE);
 
-    eui_setup_interface( &serial_comms );
-    eui_setup_identifier( "hello", 5 );
-
-    // Provide the tracked variables to the library
-    EUI_TRACK( tracked_variables );
-    printf("Started uart looping\n");
-
-    while (1) {
-        int rx_read = uart_read_bytes(EXTERNAL_UART, data, BUF_SIZE, 0);
-
-        if( rx_read > 0 )
+    while(1)
+    {
+        // Wait for a UART event
+        if( xQueueReceive(uart2_queue, (void * )&event, (portTickType)portMAX_DELAY) ) 
         {
-            for( uint16_t i = 0; i < rx_read; i++)
+            bzero(dtmp, BUF_SIZE);
+
+            switch(event.type)
             {
-                eui_parse( data[i], &serial_comms );  // Ingest a byte
+                case UART_DATA:
+                    rx_read = uart_read_bytes(EXTERNAL_UART, dtmp, event.size, portMAX_DELAY);
+
+                    if( rx_read > 0 )
+                    {
+                        for( uint16_t i = 0; i < rx_read; i++)
+                        {
+                            eui_parse( dtmp[i], &serial_comms );  // Ingest a byte
+                        }
+                    }
+                    break;
+
+                case UART_FIFO_OVF:
+                    ESP_LOGI(TAG, "HW FIFO overflow");
+
+                    uart_flush_input(EXTERNAL_UART);
+                    xQueueReset(uart2_queue);
+                    break;
+
+                case UART_BUFFER_FULL:
+                    ESP_LOGI(TAG, "Ring buffer full");
+
+                    uart_flush_input(EXTERNAL_UART);
+                    xQueueReset(uart2_queue);
+                    break;
+
+                case UART_BREAK:
+                    ESP_LOGI(TAG, "RX break");
+                    break;
+
+                case UART_PARITY_ERR:
+                    ESP_LOGI(TAG, "Parity error");
+                    break;
+
+                case UART_FRAME_ERR:
+                    ESP_LOGI(TAG, "Frame error");
+                    break;
+
+                case UART_PATTERN_DET:
+                    ESP_LOGI(TAG, "Pattern detected");
+                    // Optionally implement pattern detection
+                    break;
+
+                default:
+                    ESP_LOGI(TAG, "uart event type: %d", event.type);
+                    break;
             }
         }
-
-        vTaskDelay(100 / portTICK_PERIOD_MS); 
     }
 
+    free(dtmp);
+    dtmp = NULL;
+    vTaskDelete(NULL);
 }
 
 void serial_write( uint8_t *data, uint16_t len )
 {
     uart_write_bytes(EXTERNAL_UART, (const char *)data, len);
 }
+
 
 void blink_task(void *pvParameter) 
 { 
@@ -100,8 +159,8 @@ void blink_task(void *pvParameter)
 
     led_timer = xTaskGetTickCount();
 
-    while(1) { 
-
+    while(1)
+    { 
         if( blink_enable )
         {
             // Check if the LED has been on for the configured duration
@@ -115,12 +174,19 @@ void blink_task(void *pvParameter)
         }
 
         gpio_set_level(GPIO_LED, led_state); 
-        vTaskDelay(100 / portTICK_PERIOD_MS); 
+        vTaskDelay(pdMS_TO_TICKS( 10 )); 
+
     } 
 } 
 
 void app_main(void)
 {
-    xTaskCreate( &echo_task,  "uart_task",  4024, NULL, 5, NULL);
+    esp_log_level_set(TAG, ESP_LOG_INFO);
+
+    eui_init();
+
+    uart_init();
+    xTaskCreate( &uart_task,  "uart_task",  4096, NULL, 5, NULL);
+    
     xTaskCreate( &blink_task, "blink_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL); 
 }
