@@ -23,8 +23,14 @@ static const char *TAG = "eui_uart";
 #define GPIO_LED 13
 
 #define EXTERNAL_UART UART_NUM_2
+
+// "External" serial connection
 #define UART_TX 17
 #define UART_RX 16
+// USB-Serial Converter
+// #define UART_TX 1
+// #define UART_RX 3
+
 #define BUF_SIZE (1024)
 static QueueHandle_t uart2_queue;
 
@@ -42,7 +48,7 @@ eui_interface_t serial_comms = EUI_INTERFACE( &serial_write );
 // Electric UI manages variables referenced in this array
 eui_message_t tracked_variables[] = 
 {
-  EUI_CHAR_RO_ARRAY(  "name",  nickname ),
+  EUI_CHAR_ARRAY_RO(  "name",  nickname ),
 
   EUI_UINT8(  "led_blink",  blink_enable ),
   EUI_UINT8(  "led_state",  led_state ),
@@ -184,9 +190,9 @@ void app_main(void)
     esp_log_level_set(TAG, ESP_LOG_INFO);
 
     eui_init();
-
     uart_init();
+
     xTaskCreate( &uart_task,  "uart_task",  4096, NULL, 5, NULL);
     
-    xTaskCreate( &blink_task, "blink_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL); 
+    xTaskCreate( &blink_task, "blink_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
 }
